@@ -29,8 +29,9 @@
 /* for all application */
 struct app_confg_t
 {
-    pj_pool_t           *pool; /* pool for media */
-    // pj_str_t            local_uri;
+    pj_pool_t                   *pool; /* pool for media */
+    // pj_str_t                 local_uri;
+    pjsip_inv_callback          inv_cb;
 
 } app_cfg;
 

@@ -7,14 +7,16 @@ CC      = $(PJ_CC)
 LDFLAGS = $(PJ_LDFLAGS)
 LDLIBS  = $(PJ_LDLIBS)
 CFLAGS  = $(PJ_CFLAGS)
-CPPFLAGS= ${CFLAGS}
+CPPFLAGS = -g3
+#CPPFLAGS= ${CFLAGS}
+
 
 # If your application is in a file named myapp.cpp or myapp.c
 # this is the line you will need to build the binary.
 all: sbc  
 
 myapp: sbc.c
-	$(CC) -o -g3 $@ $< $(CPPFLAGS) $(LDFLAGS) $(LDLIBS)
+	$(CC) -o $@ $< $(CPPFLAGS) $(LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -f sbc.o mini-sbc 

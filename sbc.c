@@ -46,7 +46,7 @@ static pjsip_module msg_logger =
     NULL, NULL,             /* prev, next.      */
     { "mod-msg-log", 13 },      /* Name.        */
     -1,                 /* Id           */
-    PJSIP_MOD_PRIORITY_TRANSPORT_LAYER-1,/* Priority            */
+    PJSIP_MOD_PRIORITY_TRANSPORT_LAYER,/* Priority            */
     NULL,               /* load()       */
     NULL,               /* start()      */
     NULL,               /* stop()       */
@@ -117,8 +117,27 @@ main(int argc, char *argv[])
     /* Loop until one call is completed */
     for (;!g_complete;) 
     {
+
         pj_time_val timeout = {0, 10};
-        pjsip_endpt_handle_events(g_endpt, &timeout);
+        status = pjsip_endpt_handle_events(g_endpt, &timeout);
+        if (status != PJ_SUCCESS)
+        {
+            sbc_perror(THIS_FILE, "Error in handle_events()", status);
+            break;
+        }
+
+        // char choice[10] = {0};
+        // if (fgets(choice, sizeof(choice), stdin) == NULL)
+        // {
+        //     sbc_perror(THIS_FILE, "Error in fgets()", status);
+        //     break;
+        // }
+
+        // if (choice[0] == 'q')
+        // {
+        //     PJ_LOG(3, (THIS_FILE, "Quit!!!\n"));
+        //     break;
+        // }
     }
 
     status = sbc_destroy();
@@ -151,6 +170,12 @@ static pj_status_t main_init(void)
     {
         sbc_perror(THIS_FILE, "Error in sbc_udp_transport_create()", status);
     }
+
+    /*
+     * Init call basic media
+     */
+    status = sbc_invite_mod_create();
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
     /* 
      * Init transaction layer.
@@ -242,6 +267,7 @@ static pj_status_t sbc_global_endpt_create(void)
 static pj_status_t sbc_media_init(void)
 {
     pj_status_t status;
+    const char * transport_name = "udp";
     pj_int32_t i = 0;
 
     /* create media endpoint */
@@ -270,16 +296,16 @@ static pj_status_t sbc_media_init(void)
      * Create media transport used to send/receive RTP/RTCP socket.
      * Application may opt to re-use the same media transport
      */
-    for (i = 0; i < PJ_ARRAY_SIZE(g_med_transport); ++i) 
+    for (i = 0; i < MAX_MEDIA_CNT; i++) 
     {
-        status = pjmedia_transport_udp_create3(g_med_endpt, AF, NULL, NULL, 
-                               RTP_PORT + i*2, 0, 
-                               &g_med_transport[i]);
+        status = pjmedia_transport_udp_create3(g_med_endpt, AF, transport_name, NULL, 
+                               RTP_PORT + 2, 0, &g_med_transport[i]);
         if (status != PJ_SUCCESS) 
         {
             sbc_perror(THIS_FILE, "Unable to create media transport", status);
             return PJ_FALSE;
         }
+        PJ_LOG(3, (THIS_FILE, "%s socket created!\n", transport_name));
 
         /* 
          * Get socket info of the media transport. 
@@ -334,9 +360,10 @@ static pj_status_t sbc_destroy(void)
         pjmedia_stream_destroy(g_med_stream);
 
     /* Destroy media transports */
-    for (i = 0; i < MAX_MEDIA_CNT; ++i) {
-    if (g_med_transport[i])
-        pjmedia_transport_close(g_med_transport[i]);
+    for (i = 0; i < MAX_MEDIA_CNT; i++) 
+    {
+        if (g_med_transport[i])
+            pjmedia_transport_close(g_med_transport[i]);
     }
 
     /* Destroy event manager */
@@ -344,15 +371,17 @@ static pj_status_t sbc_destroy(void)
 
     /* Deinit pjmedia endpoint */
     if (g_med_endpt)
-    pjmedia_endpt_destroy(g_med_endpt);
+        pjmedia_endpt_destroy(g_med_endpt);
 
     /* Deinit pjsip endpoint */
     if (g_endpt)
-    pjsip_endpt_destroy(g_endpt);
+        pjsip_endpt_destroy(g_endpt);
 
     /* Release pool */
     if (app_cfg.pool)
-    pj_pool_release(app_cfg.pool);
+        pj_pool_release(app_cfg.pool);
+
+    pj_caching_pool_destroy(&cash_pool);
 
     return status;
 }
@@ -360,16 +389,16 @@ static pj_status_t sbc_destroy(void)
 static pj_status_t sbc_invite_mod_create(void)
 {
     pj_status_t status;
-    pjsip_inv_callback inv_cb;
+    // pjsip_inv_callback inv_cb;
 
     /* Init the callback for INVITE */
-    pj_bzero(&inv_cb, sizeof(inv_cb));
-    inv_cb.on_state_changed = &call_on_state_changed;
-    inv_cb.on_new_session = &call_on_forked;
-    inv_cb.on_media_update = &call_on_media_update;
+    pj_bzero(&app_cfg.inv_cb, sizeof(app_cfg.inv_cb));
+    app_cfg.inv_cb.on_state_changed = &call_on_state_changed;
+    app_cfg.inv_cb.on_new_session = &call_on_forked;
+    app_cfg.inv_cb.on_media_update = &call_on_media_update;
 
     /* Initialize invite session module:  */
-    status = pjsip_inv_usage_init(g_endpt, &inv_cb);
+    status = pjsip_inv_usage_init(g_endpt, &app_cfg.inv_cb);
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
     return status;
@@ -383,7 +412,7 @@ static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
     pjsip_dialog *dlg;
     pjmedia_sdp_session *local_sdp;
     pjsip_tx_data *tdata;
-    unsigned options = 0;
+    unsigned options;
     pj_status_t status;
 
     /* 
@@ -402,17 +431,18 @@ static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
         return PJ_TRUE;
     }
 
-    /* Verify that we can handle the request. */
-    // status = pjsip_inv_verify_request(rdata, &options, NULL, NULL,
-    //                   g_endpt, NULL);
-    // if (status != PJ_SUCCESS) 
-    // {
-    //     pj_str_t reason = pj_str("Sorry Simple UA can not handle this INVITE");
-    //     pjsip_endpt_respond_stateless( g_endpt, rdata, 
-    //                        500, &reason,
-    //                        NULL, NULL);
-    //     return PJ_TRUE;
-    // } 
+    /*
+     * Reject INVITE if we already have an INVITE session in progress.
+     */
+    if (g_inv) 
+    {
+        pj_str_t reason = pj_str("Another call is in progress");
+
+        pjsip_endpt_respond_stateless( g_endpt, rdata, 
+                           500, &reason,
+                           NULL, NULL);
+        return PJ_TRUE;
+    }
 
     /*
      * Generate Contact URI
@@ -422,9 +452,10 @@ static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
         sbc_perror(THIS_FILE, "Unable to retrieve local host IP", status);
         return PJ_TRUE;
     }
+
     pj_sockaddr_print(&hostaddr, hostip, sizeof(hostip), 2);
     pj_ansi_sprintf(temp, "<sip:sbc@%s:%d>", hostip, PORT);
-    local_uri = pj_str(temp);
+    local_uri = pj_str(temp); //some shit 
 
     /*
      * Create UAS dialog.
@@ -440,14 +471,15 @@ static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
         return PJ_TRUE;
     }
 
+    PJ_LOG(3, (THIS_FILE, "DIALOG CREATED!\n"));
+
     /* 
      * Get media capability from media endpoint: 
-     */
-
+     */ 
     status = pjmedia_endpt_create_sdp( g_med_endpt, rdata->tp_info.pool,
                        MAX_MEDIA_CNT, g_sock_info, &local_sdp);
     pj_assert(status == PJ_SUCCESS);
-    if (status != PJ_SUCCESS) 
+    if (status != PJ_SUCCESS) //return PJ_FALSE!
     {
         pjsip_dlg_dec_lock(dlg);
         return PJ_TRUE;
@@ -464,6 +496,8 @@ static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
         pjsip_dlg_dec_lock(dlg);
         return PJ_TRUE;
     }
+
+    PJ_LOG(3, (THIS_FILE, "INV CREATE UAS!\n"));
 
     /*
      * Invite session has been created, decrement & release dialog lock.
@@ -634,6 +668,7 @@ static void call_on_media_update( pjsip_inv_session *inv,
     }
     status = pjmedia_snd_port_connect(g_snd_port, media_port);
 
+    PJ_LOG(3, (THIS_FILE, "MEDIA PORT CONNECTED!\n"));
     /* Done with media. */
 }
 
