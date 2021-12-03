@@ -4,22 +4,23 @@
 /*
  *    Static variables 
  */
-
 static pj_caching_pool          cash_pool;      /* Global pool factory */
 static pjsip_endpoint           *g_endpt;       /* SIP endpoint        */
 static pjmedia_endpt            *g_med_endpt;   /* Media endpoint      */
 static pj_bool_t                g_complete;     /* Quit flag           */
-static pjmedia_transport        *g_med_transport[MAX_MEDIA_CNT]; 
-                                                /* Media stream transport   */
-static pjmedia_transport_info   g_med_tpinfo[MAX_MEDIA_CNT]; 
-                                                /* Socket info for media    */
-static pjmedia_sock_info        g_sock_info[MAX_MEDIA_CNT];  
-                                                /* Socket info array    */
+
+/*
+ * PJMEDIA LIB
+ */
+static pjmedia_transport        *g_med_transport[MAX_MEDIA_CNT];    /* Media stream transport   */
+static pjmedia_transport_info   g_med_tpinfo[MAX_MEDIA_CNT];        /* Socket info for media    */
+static pjmedia_sock_info        g_sock_info[MAX_MEDIA_CNT];         /* Socket info array    */
+static pjmedia_stream           *g_med_stream;                      /* Call's audio stream. */
+static pjmedia_snd_port         *g_snd_port;                        /* Sound device.        */
 
 /* Call variables */
-static pjsip_inv_session        *g_inv;         /* Current invite session.  */
-static pjmedia_stream           *g_med_stream;  /* Call's audio stream. */
-static pjmedia_snd_port         *g_snd_port;    /* Sound device.        */
+static pjsip_inv_session        *g_inv;         /* Current invite session A <-> SBC */
+static pjsip_inv_session        *g_out;         /* SBC <-> B side */
 
 /* Init PJSIP module to be registered by application to handle
  * incoming requests outside any dialogs/transactions
@@ -58,49 +59,6 @@ static pjsip_module msg_logger =
     &logging_on_tx_msg,         /* on_tx_response() */
     NULL,              /* on_tsx_state()   */
 };
-
-/* Notification on outgoing messages */
-static pj_status_t logging_on_tx_msg(pjsip_tx_data *tdata)
-{
-    
-    /* Important note:
-     *  tp_info field is only valid after outgoing messages has passed
-     *  transport layer. So don't try to access tp_info when the module
-     *  has lower priority than transport layer.
-     */
-
-    PJ_LOG(4,("-LOG-", "TX %d bytes %s to %s %s:%d:\n"
-             "%.*s\n"
-             "--end msg--",
-             (tdata->buf.cur - tdata->buf.start),
-             pjsip_tx_data_get_info(tdata),
-             tdata->tp_info.transport->type_name,
-             tdata->tp_info.dst_name,
-             tdata->tp_info.dst_port,
-             (int)(tdata->buf.cur - tdata->buf.start),
-             tdata->buf.start));
-
-    /* Always return success, otherwise message will not get sent! */
-    return PJ_SUCCESS;
-}
-
-/* Notification on incoming messages */
-static pj_bool_t logging_on_rx_msg(pjsip_rx_data *rdata)
-{
-    PJ_LOG(4,("-LOG-", "RX %d bytes %s from %s %s:%d:\n"
-             "%.*s\n"
-             "--end msg--",
-             rdata->msg_info.len,
-             pjsip_rx_data_get_info(rdata),
-             rdata->tp_info.transport->type_name,
-             rdata->pkt_info.src_name,
-             rdata->pkt_info.src_port,
-             (int)rdata->msg_info.len,
-             rdata->msg_info.msg_buf));
-
-    /* Always return false, otherwise messages will not get processed! */
-    return PJ_FALSE;
-}
 
 int 
 main(int argc, char *argv[])
@@ -143,21 +101,15 @@ static pj_status_t main_init(void)
 
     status = sbc_init();
     if (status != PJ_SUCCESS)
-    {
         sbc_perror(THIS_FILE, "Error in sbc_init()", status);
-    }
 
     status = sbc_global_endpt_create();
     if (status != PJ_SUCCESS)
-    {
         sbc_perror(THIS_FILE, "Error in global_endpt_create()", status);
-    }
 
     status = sbc_udp_transport_create();
     if (status != PJ_SUCCESS)
-    {
         sbc_perror(THIS_FILE, "Error in sbc_udp_transport_create()", status);
-    }
 
     /*
      * Init call basic media
@@ -194,8 +146,8 @@ static pj_status_t main_init(void)
     /*
      * Register PJMEDIA 
      */
-    status = sbc_media_init();
-    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
+    // status = sbc_media_init();
+    // PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
     return status;
 }
@@ -355,8 +307,23 @@ static pj_status_t sbc_destroy(void)
             pjmedia_transport_close(g_med_transport[i]);
     }
 
+    /*
+     * Check INVITE session A <-> SBC
+     */
+    if (g_inv)
+    {
+        pjsip_tx_data *p_tdata;
+        status = pjsip_inv_end_session(g_inv, PJSIP_SC_NOT_ACCEPTABLE, NULL, &p_tdata);
+        if (status != PJ_SUCCESS)
+            sbc_perror(THIS_FILE, "Unable terminate A session", status);
+
+        status = pjsip_inv_send_msg(g_inv, p_tdata);
+        if (status != PJ_SUCCESS)
+            sbc_perror(THIS_FILE, "Unable send terminate msg A", status);
+    }
+
     /* Destroy event manager */
-    pjmedia_event_mgr_destroy(NULL); 
+    // pjmedia_event_mgr_destroy(NULL); 
 
     /* Deinit pjmedia endpoint */
     if (g_med_endpt)
@@ -391,7 +358,7 @@ static pj_status_t sbc_invite_mod_create(void)
     pj_bzero(&inv_cb, sizeof(inv_cb));
     inv_cb.on_state_changed = &call_on_state_changed;
     inv_cb.on_new_session = &call_on_forked;
-    inv_cb.on_media_update = &call_on_media_update;
+    // inv_cb.on_media_update = &call_on_media_update;
 
     /* Initialize invite session module:  */
     status = pjsip_inv_usage_init(g_endpt, &inv_cb);
@@ -402,39 +369,92 @@ static pj_status_t sbc_invite_mod_create(void)
 
 static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
 {
-
-}
-
-/* 
- * SBC recive incoming request from A side and handling it
- */
-static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
-{
-    // pj_status_t status;
-
-    switch (rdata->msg_info.msg->line.req.method.id && 
-            pjsip_rdata_get_dlg(rdata) == NULL)
+    pj_status_t         status;
+    pjsip_tx_data       *p_tdata;
+    unsigned            options = 0;
+    pj_str_t            local_uri  = pj_str("<sip:sbc@10.25.72.130:7777>");
+    pjsip_dialog        *uas_dlg;
+    /* 
+     * Respond (statelessly) any non-INVITE requests with 500 
+     */
+    if (rdata->msg_info.msg->line.req.method.id != PJSIP_INVITE_METHOD) 
     {
-        case PJSIP_INVITE_METHOD:
-            sbc_invite_handler(rdata);
-            break;
-        
-        default:
+        if (rdata->msg_info.msg->line.req.method.id != PJSIP_ACK_METHOD) 
         {
-            PJ_LOG(3, (THIS_FILE, "default \n"));
-            break;
+            pj_str_t reason = pj_str("Simple UA unable to handle this request");
+            pjsip_endpt_respond_stateless( g_endpt, rdata, 500, &reason,
+                           NULL, NULL);
         }
+        return PJ_TRUE;
     }
 
-    return PJ_TRUE;
-}
+    /*
+     * Reject INVITE if we already have an INVITE session in progress.
+     */
+    if (g_inv)
+    { 
+        pj_str_t reason = pj_str("Another call is in progress");
+        pjsip_endpt_respond_stateless(g_endpt, rdata, 500, &reason,
+                           NULL, NULL);
+        return PJ_TRUE;
+    }
 
-/*
- * Recive response from B side
- */
-static pj_bool_t on_rx_response( pjsip_rx_data *rdata)
-{
-    PJ_LOG(3, (THIS_FILE, "RX_Response"));
+    /* 
+     * Verify that we can handle the request 
+     */
+    status = pjsip_inv_verify_request(rdata, &options, NULL, NULL,
+                                    g_endpt, NULL);
+    if (status != PJ_SUCCESS) 
+    {
+        pj_str_t reason = pj_str("Sorry UA can't handle this INVITE");
+        pjsip_endpt_respond_stateless( g_endpt, rdata, 500, &reason,
+                           NULL, NULL);
+        sbc_perror(THIS_FILE, "shutdown application", status);
+    }
+
+    /*
+     * Create UAS dialog
+     */
+    status = pjsip_dlg_create_uas_and_inc_lock(pjsip_ua_instance(),
+                        rdata, &local_uri, &uas_dlg);
+    if (status != PJ_SUCCESS) 
+    {
+        pjsip_endpt_respond_stateless(g_endpt, rdata, 500, NULL,
+                          NULL, NULL);
+        sbc_perror(THIS_FILE, "shutdown application", status);
+    }
+
+    /* 
+     * Create invite session, and pass both the UAS dialog
+     */
+    status = pjsip_inv_create_uas( uas_dlg, rdata, NULL, 0, &g_inv);
+    pj_assert(status == PJ_SUCCESS);
+    if (status != PJ_SUCCESS) 
+    {
+        pjsip_dlg_dec_lock(uas_dlg);
+        sbc_perror(THIS_FILE, "shutdown application", status);
+    }
+
+    /*
+     * Invite session has been created, decrement & release dialog lock.
+     */
+    pjsip_dlg_dec_lock(uas_dlg);
+
+    /*
+     * Initially first response & send 100 trying
+     */
+    status = pjsip_inv_initial_answer(g_inv, rdata, 
+                                    180, NULL, NULL, &p_tdata);
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, PJ_TRUE);
+
+    /* Send the 180 response. */  
+    status = pjsip_inv_send_msg(g_inv, p_tdata); 
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, PJ_TRUE);
+
+    /*
+     * Send INVITE to other side
+     */
+    sbc_request_inv_send(rdata);
 
     return PJ_TRUE;
 }
@@ -444,6 +464,71 @@ static pj_bool_t on_rx_response( pjsip_rx_data *rdata)
  */
 static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
 {
+    pj_status_t         status;
+    pjsip_tx_data       *p_tdata;
+    pjsip_dialog        *uac_dlg;
+
+    pj_str_t            local_uri = pj_str("<sip:sbc@10.25.72.130:7777>");
+    pj_str_t            dest_uri  = pj_str("<sip:winehouse@10.25.72.75:5062>");
+
+    /* 
+     * We already verify request, just create UAC
+     */
+    status = pjsip_dlg_create_uac(pjsip_ua_instance(), 
+                        &local_uri,
+                        &local_uri,
+                        &dest_uri,
+                        &dest_uri,
+                        &uac_dlg);
+    if (status != PJ_SUCCESS)
+        sbc_perror(THIS_FILE, "Unable create UAC", status);
+
+    /* 
+     * Create the INVITE session for B side
+     */
+    status = pjsip_inv_create_uac(uac_dlg, NULL, 0, &g_out);
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
+
+    /*
+     * Create INVITE request 
+     */
+    status = pjsip_inv_invite(g_out, &p_tdata);
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
+
+    /*
+     * Send INVITE to B
+     */
+    status = pjsip_inv_send_msg(g_out, p_tdata);
+    PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
+
+    return PJ_TRUE;
+}
+
+/* 
+ * SBC recive incoming request from A side and handling it
+ */
+static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
+{
+    // pj_status_t status;
+    switch (rdata->msg_info.msg->line.req.method.id)
+    {
+        case PJSIP_INVITE_METHOD:
+            sbc_invite_handler(rdata);
+            break;
+        
+        default:
+            PJ_LOG(3, (THIS_FILE, "default \n"));
+            break;
+    }
+    return PJ_TRUE;
+}
+
+/*
+ * Recive response from B side
+ */
+static pj_bool_t on_rx_response( pjsip_rx_data *rdata)
+{
+    PJ_LOG(3, (THIS_FILE, "RX_Response"));
 
     return PJ_TRUE;
 }
@@ -465,6 +550,8 @@ static void on_tsx_state( pjsip_transaction *tsx, pjsip_event *event)
  */
 static void call_on_state_changed( pjsip_inv_session *inv, pjsip_event *e)
 {
+    pj_status_t         status;
+    pjsip_tx_data       *p_tdata;
     PJ_UNUSED_ARG(e);
 
     if (inv->state == PJSIP_INV_STATE_DISCONNECTED) 
@@ -475,6 +562,20 @@ static void call_on_state_changed( pjsip_inv_session *inv, pjsip_event *e)
 
         PJ_LOG(3,(THIS_FILE, "One call completed, application quitting..."));
         g_complete = 1;
+
+        /*
+         * B side DISCONNECTED, we SHOULD send terminate to A side
+         */
+        // if (g_inv)
+        // {
+        //     status = pjsip_inv_end_session(g_inv, inv->cause, NULL, &p_tdata);
+        //     if (status != PJ_SUCCESS)
+        //         sbc_perror(THIS_FILE, "Unable terminate A session", status);
+
+        //     status = pjsip_inv_send_msg(g_inv, p_tdata);
+        //     if (status != PJ_SUCCESS)
+        //         sbc_perror(THIS_FILE, "Unable send terminate msg A", status);
+        // }
     } 
     else 
     {
@@ -585,6 +686,49 @@ static void call_on_media_update( pjsip_inv_session *inv,
 
     PJ_LOG(3, (THIS_FILE, "MEDIA PORT CONNECTED!\n"));
     /* Done with media. */
+}
+
+/* Notification on outgoing messages */
+static pj_status_t logging_on_tx_msg(pjsip_tx_data *tdata)
+{
+    
+    /* Important note:
+     *  tp_info field is only valid after outgoing messages has passed
+     *  transport layer. So don't try to access tp_info when the module
+     *  has lower priority than transport layer.
+     */
+
+    PJ_LOG(4,("-LOG-", "TX %d bytes %s to %s %s:%d:\n"
+             "%.*s\n"
+             "--end msg--",
+             (tdata->buf.cur - tdata->buf.start),
+             pjsip_tx_data_get_info(tdata),
+             tdata->tp_info.transport->type_name,
+             tdata->tp_info.dst_name,
+             tdata->tp_info.dst_port,
+             (int)(tdata->buf.cur - tdata->buf.start),
+             tdata->buf.start));
+
+    /* Always return success, otherwise message will not get sent! */
+    return PJ_SUCCESS;
+}
+
+/* Notification on incoming messages */
+static pj_bool_t logging_on_rx_msg(pjsip_rx_data *rdata)
+{
+    PJ_LOG(4,("-LOG-", "RX %d bytes %s from %s %s:%d:\n"
+             "%.*s\n"
+             "--end msg--",
+             rdata->msg_info.len,
+             pjsip_rx_data_get_info(rdata),
+             rdata->tp_info.transport->type_name,
+             rdata->pkt_info.src_name,
+             rdata->pkt_info.src_port,
+             (int)rdata->msg_info.len,
+             rdata->msg_info.msg_buf));
+
+    /* Always return false, otherwise messages will not get processed! */
+    return PJ_FALSE;
 }
 
 static void sbc_perror(const char *sender, const char *title, 
