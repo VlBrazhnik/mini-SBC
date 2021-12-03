@@ -60,6 +60,7 @@ static pj_status_t sbc_media_init(void);
 /* Handler for INVITE request */
 static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata);
 static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata);
+static pj_bool_t sbc_response_code_send( unsigned code);
 
 /* Logging */
 static pj_status_t logging_on_tx_msg(pjsip_tx_data *tdata);

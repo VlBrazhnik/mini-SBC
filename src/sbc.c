@@ -75,7 +75,7 @@ main(int argc, char *argv[])
 
     PJ_LOG(3, (THIS_FILE, "Press: Cntrl+C for quit\n"));
     /* Loop until one call is completed */
-    while(!g_complete)
+    while(1)
     {
         pj_time_val timeout = {0, 10};
         status = pjsip_endpt_handle_events(g_endpt, &timeout);
@@ -310,17 +310,17 @@ static pj_status_t sbc_destroy(void)
     /*
      * Check INVITE session A <-> SBC
      */
-    if (g_inv)
-    {
-        pjsip_tx_data *p_tdata;
-        status = pjsip_inv_end_session(g_inv, PJSIP_SC_NOT_ACCEPTABLE, NULL, &p_tdata);
-        if (status != PJ_SUCCESS)
-            sbc_perror(THIS_FILE, "Unable terminate A session", status);
+    // if (g_inv)
+    // {
+    //     pjsip_tx_data *p_tdata;
+    //     status = pjsip_inv_end_session(g_inv, PJSIP_SC_NOT_ACCEPTABLE, NULL, &p_tdata);
+    //     if (status != PJ_SUCCESS)
+    //         sbc_perror(THIS_FILE, "Unable terminate A session", status);
 
-        status = pjsip_inv_send_msg(g_inv, p_tdata);
-        if (status != PJ_SUCCESS)
-            sbc_perror(THIS_FILE, "Unable send terminate msg A", status);
-    }
+    //     status = pjsip_inv_send_msg(g_inv, p_tdata);
+    //     if (status != PJ_SUCCESS)
+    //         sbc_perror(THIS_FILE, "Unable send terminate msg A", status);
+    // }
 
     /* Destroy event manager */
     // pjmedia_event_mgr_destroy(NULL); 
@@ -424,6 +424,16 @@ static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
         sbc_perror(THIS_FILE, "shutdown application", status);
     }
 
+    /*
+     * Add application module to dialog usages
+     */
+    status = pjsip_dlg_add_usage(uas_dlg, &mod_sbc, NULL);
+    if (status != PJ_SUCCESS)
+    {
+        pjsip_dlg_dec_lock(uas_dlg);
+        sbc_perror(THIS_FILE, "shutdown application", status);
+    }
+
     /* 
      * Create invite session, and pass both the UAS dialog
      */
@@ -443,11 +453,10 @@ static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
     /*
      * Initially first response & send 100 trying
      */
-    status = pjsip_inv_initial_answer(g_inv, rdata, 
-                                    180, NULL, NULL, &p_tdata);
+    status = pjsip_inv_initial_answer(g_inv, rdata, PJSIP_SC_TRYING, NULL, NULL, &p_tdata);
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, PJ_TRUE);
 
-    /* Send the 180 response. */  
+    /* Send the 100 response. */  
     status = pjsip_inv_send_msg(g_inv, p_tdata); 
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, PJ_TRUE);
 
@@ -468,7 +477,8 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
     pjsip_tx_data       *p_tdata;
     pjsip_dialog        *uac_dlg;
 
-    pj_str_t            local_uri = pj_str("<sip:sbc@10.25.72.130:7777>");
+    pj_str_t            local_uri = pj_str("<sip:vlbrazhnikov@10.25.72.130:6020>");
+    pj_str_t            contact_uri = pj_str("<sip:sbc@10.25.72.130:7777>");
     pj_str_t            dest_uri  = pj_str("<sip:winehouse@10.25.72.75:5062>");
 
     /* 
@@ -476,12 +486,24 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
      */
     status = pjsip_dlg_create_uac(pjsip_ua_instance(), 
                         &local_uri,
-                        &local_uri,
+                        &contact_uri,
                         &dest_uri,
                         &dest_uri,
                         &uac_dlg);
     if (status != PJ_SUCCESS)
         sbc_perror(THIS_FILE, "Unable create UAC", status);
+
+    pjsip_dlg_inc_lock(uac_dlg);
+
+    /*
+     * Add application module to dialog usages
+     */
+    status = pjsip_dlg_add_usage(uac_dlg, &mod_sbc, NULL);
+    if (status != PJ_SUCCESS)
+    {
+        pjsip_dlg_dec_lock(uac_dlg);
+        sbc_perror(THIS_FILE, "shutdown application", status);
+    }
 
     /* 
      * Create the INVITE session for B side
@@ -500,6 +522,31 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
      */
     status = pjsip_inv_send_msg(g_out, p_tdata);
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
+
+    return PJ_TRUE;
+}
+
+/*
+ * SBC send response to B side
+ */
+static pj_bool_t sbc_response_code_send( unsigned code)
+{
+    pj_status_t         status;
+    pjsip_tx_data       *p_tdata;
+
+    /*
+     * Before we sent response, SBC SHOULD recive response and handling it
+     */
+
+    PJ_LOG(3, (THIS_FILE, "sent response_code to A side\n"));
+
+    status = pjsip_inv_answer(g_inv, code, NULL, NULL, &p_tdata);
+    if (status != PJ_SUCCESS)
+        sbc_perror(THIS_FILE, "Unable create response A", status);
+
+    status = pjsip_inv_send_msg(g_inv, p_tdata);
+    if (status != PJ_SUCCESS)
+        sbc_perror(THIS_FILE, "Unable send response A", status);
 
     return PJ_TRUE;
 }
@@ -528,8 +575,26 @@ static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
  */
 static pj_bool_t on_rx_response( pjsip_rx_data *rdata)
 {
-    PJ_LOG(3, (THIS_FILE, "RX_Response"));
+    pj_status_t     status;
 
+    PJ_LOG(3, (THIS_FILE, "RESPONSE callback work!\n"));
+    unsigned        response_code = rdata->msg_info.msg->line.status.code;
+
+    // if (g_complete)
+    // {
+        switch(response_code)
+        {
+            case PJSIP_SC_RINGING:
+                sbc_response_code_send(PJSIP_SC_RINGING);
+                break;
+
+            case PJSIP_SC_OK:
+                sbc_response_code_send(PJSIP_SC_OK);
+                break;
+            default:
+                PJ_LOG(3, (THIS_FILE, "response not found", status));
+        }
+    // }
     return PJ_TRUE;
 }
 
@@ -560,23 +625,12 @@ static void call_on_state_changed( pjsip_inv_session *inv, pjsip_event *e)
                     inv->cause,
                     pjsip_get_status_text(inv->cause)->ptr));
 
-        PJ_LOG(3,(THIS_FILE, "One call completed, application quitting..."));
-        g_complete = 1;
-
+        // PJ_LOG(3,(THIS_FILE, "One call completed, application quitting..."));
+        // g_complete = 1;
         /*
          * B side DISCONNECTED, we SHOULD send terminate to A side
          */
-        // if (g_inv)
-        // {
-        //     status = pjsip_inv_end_session(g_inv, inv->cause, NULL, &p_tdata);
-        //     if (status != PJ_SUCCESS)
-        //         sbc_perror(THIS_FILE, "Unable terminate A session", status);
-
-        //     status = pjsip_inv_send_msg(g_inv, p_tdata);
-        //     if (status != PJ_SUCCESS)
-        //         sbc_perror(THIS_FILE, "Unable send terminate msg A", status);
-        // }
-    } 
+    }
     else 
     {
         PJ_LOG(3,(THIS_FILE, "Call state changed to %s", 
