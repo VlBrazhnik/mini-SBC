@@ -18,7 +18,7 @@
 
 /* Settings for UDP transport*/
 #define AF                  pj_AF_INET()
-#define PORT                7777
+#define SBC_PORT            7777
 #define RTP_PORT            4020
 #define PORT2               8888
 #define MAX_MEDIA_CNT       1        /* Media count, set to 1 for aud 2 for aud & video */
