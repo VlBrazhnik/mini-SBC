@@ -74,10 +74,10 @@ main(int argc, char *argv[])
     }
 
     PJ_LOG(3, (THIS_FILE, "Press: Cntrl+C for quit\n"));
-    /* Loop until one call is completed */
+    /* Loop */
     while(1)
     {
-        pj_time_val timeout = {0, 10};
+        pj_time_val timeout = {0, TIMEOUT_EVENTS_MS};
         status = pjsip_endpt_handle_events(g_endpt, &timeout);
         if (status != PJ_SUCCESS)
         {
@@ -112,7 +112,7 @@ static pj_status_t main_init(void)
         sbc_perror(THIS_FILE, "Error in sbc_udp_transport_create()", status);
 
     /*
-     * Init call basic media
+     * Init High-Level dialog API
      */
     status = sbc_invite_mod_create();
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
@@ -451,6 +451,19 @@ static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
     pjsip_dlg_dec_lock(uas_dlg);
 
     /*
+     * Get SDP body
+     */ 
+    pjsip_rdata_sdp_info *sdp_info;
+    sdp_info = pjsip_rdata_get_sdp_info(rdata);
+
+    /*
+     * Set local SDP offer / answer for g_inv
+     */
+    status = pjsip_inv_set_local_sdp(g_inv, sdp_info->sdp);
+    if (status != PJ_SUCCESS)
+        sbc_perror(THIS_FILE, "Error local_SDP\n", status);
+
+    /*
      * Initially first response & send 100 trying
      */
     status = pjsip_inv_initial_answer(g_inv, rdata, PJSIP_SC_TRYING, NULL, NULL, &p_tdata);
@@ -511,6 +524,20 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
     status = pjsip_inv_create_uac(uac_dlg, NULL, 0, &g_out);
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
+     /*
+     * Get SDP body
+     */ 
+    pjsip_rdata_sdp_info *sdp_info;
+
+    sdp_info = pjsip_rdata_get_sdp_info(rdata);
+
+    /*
+     * Set local SDP offer / answer for g_inv
+     */
+    status = pjsip_inv_set_local_sdp(g_out, sdp_info->sdp);
+    if (status != PJ_SUCCESS)
+        sbc_perror(THIS_FILE, "Error local_SDP\n", status);
+
     /*
      * Create INVITE request 
      */
@@ -529,20 +556,46 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
 /*
  * SBC send response to B side
  */
-static pj_bool_t sbc_response_code_send( unsigned code)
+static pj_bool_t sbc_response_code_send(pjsip_rx_data * rdata, unsigned code)
 {
-    pj_status_t         status;
-    pjsip_tx_data       *p_tdata;
+    pj_status_t                 status;
+    pjsip_tx_data               *p_tdata;
+    pjsip_rdata_sdp_info        *sdp_info_b;
+    pjsip_msg_body              *p_body;
 
     /*
      * Before we sent response, SBC SHOULD recive response and handling it
      */
+
+    /* 
+     * get from rdata sdp_info->pjmedia_sdp_session
+     * with pjsip_rdata_get_sdp_info(rdata);
+     * create msg_body for A side with pjsip_create_sdp_body();
+     * set msg_body for A?
+     */
+    sdp_info_b = pjsip_rdata_get_sdp_info(rdata);
 
     PJ_LOG(3, (THIS_FILE, "sent response_code to A side\n"));
 
     status = pjsip_inv_answer(g_inv, code, NULL, NULL, &p_tdata);
     if (status != PJ_SUCCESS)
         sbc_perror(THIS_FILE, "Unable create response A", status);
+
+    if (code == 200)
+    {
+        status = pjsip_create_sdp_body(p_tdata->pool, 
+                                sdp_info_b->sdp,
+                                &p_body);
+        if (status != PJ_SUCCESS)
+            sbc_perror(THIS_FILE, "Error in create_sdp_body", status);
+
+        /* set new body */
+        pj_size_t size = 100;
+        char buf[size];
+        p_tdata->msg->body = p_body;
+        p_tdata->msg->body->print_body(p_tdata->msg->body, buf, size);
+        PJ_LOG(3, (THIS_FILE, "%s, len: %lu", buf, size));
+    }
 
     status = pjsip_inv_send_msg(g_inv, p_tdata);
     if (status != PJ_SUCCESS)
@@ -576,25 +629,30 @@ static pj_bool_t on_rx_request( pjsip_rx_data *rdata )
 static pj_bool_t on_rx_response( pjsip_rx_data *rdata)
 {
     pj_status_t     status;
-
-    PJ_LOG(3, (THIS_FILE, "RESPONSE callback work!\n"));
     unsigned        response_code = rdata->msg_info.msg->line.status.code;
 
-    // if (g_complete)
-    // {
+    PJ_LOG(3, (THIS_FILE, "Should check rdata in on_rx_response!\n"));
+
+    if (g_inv != NULL)
+    {
         switch(response_code)
         {
             case PJSIP_SC_RINGING:
-                sbc_response_code_send(PJSIP_SC_RINGING);
+                sbc_response_code_send(rdata, PJSIP_SC_RINGING);
                 break;
 
             case PJSIP_SC_OK:
-                sbc_response_code_send(PJSIP_SC_OK);
+                sbc_response_code_send(rdata, PJSIP_SC_OK);
                 break;
             default:
                 PJ_LOG(3, (THIS_FILE, "response not found", status));
         }
-    // }
+    }
+    else
+    {
+        PJ_LOG(6, (THIS_FILE, "session A<->SBC already TERMINATED\n"));
+        return PJ_FALSE;
+    }
     return PJ_TRUE;
 }
 
@@ -625,11 +683,28 @@ static void call_on_state_changed( pjsip_inv_session *inv, pjsip_event *e)
                     inv->cause,
                     pjsip_get_status_text(inv->cause)->ptr));
 
-        // PJ_LOG(3,(THIS_FILE, "One call completed, application quitting..."));
-        // g_complete = 1;
-        /*
-         * B side DISCONNECTED, we SHOULD send terminate to A side
-         */
+        PJ_LOG(6, (THIS_FILE, "INV role: %s", inv->role));
+
+        if (inv == g_inv)
+        {
+            PJ_LOG(3, (THIS_FILE, "A sent BYE SBC, SBC sent BYE B"));
+
+            status = pjsip_inv_end_session(g_out, inv->cause, NULL, &p_tdata);
+            if (status != PJ_SUCCESS)
+                sbc_perror(THIS_FILE, "Error end_session()", status);
+
+            status = pjsip_inv_send_msg(g_out, p_tdata);
+            if (status != PJ_SUCCESS)
+                sbc_perror(THIS_FILE, "Error sent BYE to B", status);
+
+            do
+            {
+                status = pjsip_inv_dec_ref(g_inv);
+            }
+            while (status != PJ_EGONE);
+            g_inv = NULL;
+            PJ_LOG(6, (THIS_FILE, "g_inv is destroyed\n"));
+        } 
     }
     else 
     {
@@ -737,6 +812,8 @@ static void call_on_media_update( pjsip_inv_session *inv,
         return;
     }
     status = pjmedia_snd_port_connect(g_snd_port, media_port);
+    if (status != PJ_SUCCESS)
+        sbc_perror(THIS_FILE, "Error in pjmedia_snd_port_connect()", status);
 
     PJ_LOG(3, (THIS_FILE, "MEDIA PORT CONNECTED!\n"));
     /* Done with media. */

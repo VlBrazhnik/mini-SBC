@@ -1,7 +1,6 @@
 #pragma once
 
 /* PJSUA framework */
-
 #include <pjlib.h>
 #include <pjlib-util.h>
 #include <pjmedia.h>
@@ -15,16 +14,15 @@
 #include "util.h"
 
 /* for LOG */
-
-#define THIS_FILE "SBC_mini"
+#define THIS_FILE           "SBC_mini"
 
 /* Settings for UDP transport*/
-
-#define AF              pj_AF_INET()
-#define PORT            7777
-#define RTP_PORT        4020
-#define PORT2           8888
-#define MAX_MEDIA_CNT   1        /* Media count, set to 1 for aud 2 for aud & video */
+#define AF                  pj_AF_INET()
+#define PORT                7777
+#define RTP_PORT            4020
+#define PORT2               8888
+#define MAX_MEDIA_CNT       1        /* Media count, set to 1 for aud 2 for aud & video */
+#define TIMEOUT_EVENTS_MS   5000
 
 /* for all application */
 struct app_confg_t
@@ -60,7 +58,7 @@ static pj_status_t sbc_media_init(void);
 /* Handler for INVITE request */
 static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata);
 static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata);
-static pj_bool_t sbc_response_code_send( unsigned code);
+static pj_bool_t sbc_response_code_send(pjsip_rx_data *rdata, unsigned code);
 
 /* Logging */
 static pj_status_t logging_on_tx_msg(pjsip_tx_data *tdata);
