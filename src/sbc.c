@@ -11,6 +11,7 @@ static pj_bool_t                g_complete;     /* Quit flag           */
 /* Call variables */
 static pjsip_inv_session        *g_inv;         /* Current invite session A <-> SBC */
 static pjsip_inv_session        *g_out;         /* SBC <-> B side */
+static pjsip_transport          *p_transport_b;
 
 /* Init PJSIP module to be registered by application to handle
  * incoming requests outside any dialogs/transactions
@@ -191,8 +192,9 @@ static pj_status_t sbc_global_endpt_create(void)
 static pj_status_t sbc_udp_transport_create(void)
 {
     pj_status_t status;
-    pj_sockaddr addr;
+    pj_sockaddr addr, addr_b;
     pj_int32_t af = AF;
+    pj_str_t        str_addr = pj_str("10.25.72.110");
 
     /* Socket init */
     pj_sockaddr_init(af, &addr, NULL, (pj_uint16_t)SBC_PORT);
@@ -201,6 +203,22 @@ static pj_status_t sbc_udp_transport_create(void)
     if (status != PJ_SUCCESS)
     {
         sbc_perror(THIS_FILE, "Unable to start UDP transport", status);
+    }
+
+    /*
+     * Create sub_network for hide topology
+     */
+    status = pj_sockaddr_init(af, &addr_b, &str_addr, (pj_uint16_t)(SBC_PORT + 2));
+    if (status != PJ_SUCCESS)
+    {
+        PJ_LOG(3, (THIS_FILE, "Check that sub_net is up\n"));
+        sbc_perror(THIS_FILE, "Unable init second socket\n", status);
+    }
+
+    status = pjsip_udp_transport_start(g_endpt, &addr_b.ipv4, NULL, 2, &p_transport_b);
+    if (status != PJ_SUCCESS)
+    {
+        sbc_perror(THIS_FILE, "Unable to start SECOND UDP transport", status);
     }
 
     return status;
@@ -214,56 +232,9 @@ static pj_status_t sbc_destroy(void)
     /* On exit, dump current memory usage: */
     dump_pool_usage(THIS_FILE, &cash_pool);
 
-    /* Destroy the audio port first before the stream since 
-     * the audio port has threads that get/put frames to the stream.
-     */
-    if (g_snd_port)
-        pjmedia_snd_port_destroy(g_snd_port);
-
-    /* Destroy streams */
-    if (g_med_stream)
-        pjmedia_stream_destroy(g_med_stream);
-
-    /* Destroy media transports */
-    for (i = 0; i < MAX_MEDIA_CNT; i++) 
-    {
-        if (g_med_transport[i])
-            pjmedia_transport_close(g_med_transport[i]);
-    }
-
-    /*
-     * Check INVITE session A <-> SBC
-     */
-    // if (g_inv)
-    // {
-    //     pjsip_tx_data *p_tdata;
-    //     status = pjsip_inv_end_session(g_inv, PJSIP_SC_NOT_ACCEPTABLE, NULL, &p_tdata);
-    //     if (status != PJ_SUCCESS)
-    //         sbc_perror(THIS_FILE, "Unable terminate A session", status);
-
-    //     status = pjsip_inv_send_msg(g_inv, p_tdata);
-    //     if (status != PJ_SUCCESS)
-    //         sbc_perror(THIS_FILE, "Unable send terminate msg A", status);
-    // }
-
-    /* Destroy event manager */
-    // pjmedia_event_mgr_destroy(NULL); 
-
-    /* Deinit pjmedia endpoint */
-    if (g_med_endpt)
-        pjmedia_endpt_destroy(g_med_endpt);
-
     /* Deinit pjsip endpoint */
-    if (g_endpt)
-        pjsip_endpt_destroy(g_endpt);
-        g_endpt = NULL;
-
-    /* Release pool */
-    if (app_cfg.pool)
-        pj_pool_release(app_cfg.pool);
-        app_cfg.pool = NULL;
-        PJ_LOG(3, (THIS_FILE, "Peak memory size: %uMB", 
-            cash_pool.peak_used_size / 1000000));
+    pjsip_endpt_destroy(g_endpt);
+    g_endpt = NULL;
 
     pj_caching_pool_destroy(&cash_pool);
 
@@ -425,13 +396,32 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
     pj_status_t         status;
     pjsip_tx_data       *p_tdata;
     pjsip_dialog        *uac_dlg;
-    pj_str_t            local_uri = pj_str("<sip:vlbrazhnikov@10.25.72.130:6020>");
-    pj_str_t            contact_uri = pj_str("<sip:sbc@10.25.72.130:7777>");
-    pj_str_t            dest_uri  = pj_str("<sip:winehouse@10.25.72.75:5062>");
+    pj_sock_t         sock_sent;
+    pjsip_host_port     new_host;
+
+    // pjsip_transaction   *tsx;
+
+    // pj_str_t            local_uri = pj_str("<sip:sbc@10.25.72.110:7779>");
+    // pj_str_t            dest_uri  = pj_str("<sip:winehouse@10.25.72.75:5062>");
+
+    pj_str_t            local_uri = pj_str("<sip:vlbrazhnikov@10.25.72.130>");
+    pj_str_t            contact_uri = pj_str("<sip:sbc@10.25.72.110:7779>");
+    pj_str_t            dest_uri = pj_str(ROUTE_ADDR);
+
+    // uri = pjsip_uri_get_uri(rdata->msg_info.via->uri);
+    // sip_uri = (pjsip_sip_uri *)uri;
+    // sip_uri->host = pj_str("10.25.72.110");
+    // sip_uri->port = (int)7779;
+
 
     /* 
      * We already verify request, just create UAC
      */
+    // pjsip_host_port via_addr;
+    // via_addr.host = pj_str("10.25.72.110");
+    // via_addr.port = (int)(SBC_PORT + 2);
+    // uac_dlg->tp_sel.u.transport = p_transport_b;
+
     status = pjsip_dlg_create_uac(pjsip_ua_instance(), 
                         &local_uri,
                         &local_uri,
@@ -440,6 +430,13 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
                         &uac_dlg);
     if (status != PJ_SUCCESS)
         sbc_perror(THIS_FILE, "Unable create UAC", status);
+
+     /* set the "sent-by" of the Via */
+    // uac_dlg->tp_sel.u.transport = p_transport_b;
+    // status = pjsip_dlg_set_via_sent_by(uac_dlg, &via_addr, p_transport_b);
+    // if (status != PJ_SUCCESS)
+    //     sbc_perror(THIS_FILE, "Error set sent-by", status);
+
 
     pjsip_dlg_inc_lock(uac_dlg);
 
@@ -459,6 +456,30 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
     status = pjsip_inv_create_uac(uac_dlg, NULL, 0, &g_out);
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
+    /*
+     * Get udp socket
+     */
+    sock_sent = pjsip_udp_transport_get_socket(p_transport_b);
+    if (sock_sent == PJ_INVALID_SOCKET)
+        sbc_perror(THIS_FILE, "Socket not found\n", status);
+
+    /*
+     * Set new host part for B
+     */
+    new_host.host = pj_str("10.25.72.110");
+    new_host.port = (int)(SBC_PORT2);
+    PJ_LOG(3, (THIS_FILE, "hostname: %s, slen %d; hostport: %d", 
+                new_host.host,
+                new_host.host.slen,
+                new_host.port));
+
+    /*
+     * Set socket to transport
+     */
+    status = pjsip_udp_transport_attach(g_endpt, sock_sent, &new_host, 1, NULL);
+    if (status != PJ_SUCCESS)
+        sbc_perror(THIS_FILE, "Cannot attach UDP ", status);
+    
      /*
      * Get SDP body
      */ 
@@ -472,6 +493,7 @@ static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
     status = pjsip_inv_set_local_sdp(g_out, sdp_info->sdp);
     if (status != PJ_SUCCESS)
         sbc_perror(THIS_FILE, "Error local_SDP\n", status);
+
 
     /*
      * Create INVITE request 
@@ -620,7 +642,7 @@ static void call_on_state_changed( pjsip_inv_session *inv, pjsip_event *e)
 
         PJ_LOG(6, (THIS_FILE, "INV role: %s", inv->role));
 
-        if (inv == g_inv)
+        if (inv == g_inv && g_out) 
         {
             PJ_LOG(3, (THIS_FILE, "A sent BYE SBC, SBC sent BYE B"));
 
