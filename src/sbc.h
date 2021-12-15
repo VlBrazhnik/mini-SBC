@@ -11,8 +11,6 @@
 #include <pjsip_ua.h>
 #include <pjsua-lib/pjsua.h>
 
-#include "util.h"
-
 /* for LOG */
 #define THIS_FILE           "SBC_mini"
 #define ROUTE_ADDR          "<sip:winehouse@10.25.72.86:5062>"
@@ -30,7 +28,7 @@
 /* define prototypes of func */
 
 static void sbc_perror(const char *sender, const char *title, pj_status_t status);
-
+static void sbc_destroy(void);
 
 static void call_on_state_changed( pjsip_inv_session *inv, pjsip_event *e);
 static void call_on_forked(pjsip_inv_session *inv, pjsip_event *e);
@@ -38,7 +36,6 @@ static void call_on_forked(pjsip_inv_session *inv, pjsip_event *e);
 
 static pj_status_t main_init(void);
 static pj_status_t sbc_init(void);
-static pj_status_t sbc_destroy(void);
 static pj_status_t sbc_global_endpt_create(void);
 static pj_status_t sbc_udp_transport_create(void);
 static pj_status_t sbc_invite_mod_create(void);
@@ -58,3 +55,6 @@ static void on_tsx_state( pjsip_transaction *tsx, pjsip_event *event);
 /* Callback to be called to handle incoming requests outside dialogs: */
 static pj_bool_t on_rx_request( pjsip_rx_data *rdata );
 static pj_bool_t on_rx_response( pjsip_rx_data *rdata);
+
+/* Dump memory pool usage. */
+static void dump_pool_usage( const char *app_name, pj_caching_pool *cp );
