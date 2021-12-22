@@ -14,6 +14,15 @@
 /* for LOG */
 #define THIS_FILE           "SBC_mini"
 #define ROUTE_ADDR          "<sip:winehouse@10.25.72.86:5062>"
+#define SBC_URI_UAS         "<sip:sbc@10.25.72.100:7777>"
+#define SBC_UAS_ADDR        "10.25.72.100"
+#define SBC_URI_UAC         "<sip:sbc@10.25.72.110:7779>"
+#define SBC_UAC_ADDR        "10.25.72.110"
+
+// #define SBC_UAC_ADDR        "192.168.23.32"
+// #define SBC_URI_UAC          "<sip:sbc@192.168.23.32:7779>"
+
+
 /* Settings for UDP transport*/
 #define AF                  pj_AF_INET()
 #define SBC_PORT            7777
