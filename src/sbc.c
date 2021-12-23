@@ -6,14 +6,17 @@
 static pj_caching_pool          cash_pool;      /* Global pool factory */
 static pjsip_endpoint           *g_endpt;       /* SIP endpoint        */
 
-/* Call variables */
+/*
+ * Call variables
+ */
 static pjsip_inv_session        *g_inv;         /* Current invite session A <-> SBC */
 static pjsip_inv_session        *g_out;         /* SBC <-> B side */
 static pjsip_transport          *p_tp_uas;      /* Save transport UAS */
 static pjsip_transport          *p_tp_uac;      /* Save transport UAC */
 static pjsip_rx_data            *new_rdata;     /* for response to A side */
 
-/* Init PJSIP module to be registered by application to handle
+/* 
+ * Init PJSIP module to be registered by application to handle
  * incoming requests outside any dialogs/transactions
  */
 static pjsip_module mod_sbc =
@@ -33,7 +36,9 @@ static pjsip_module mod_sbc =
     &on_tsx_state,              /* &on_tsx_state()       */
 };
 
-/* The module for logging messages. */
+/* 
+ * The module for logging messages
+ */
 static pjsip_module msg_logger = 
 {
     NULL, NULL,                 /* prev, next.      */
@@ -141,12 +146,16 @@ static pj_status_t main_init(void)
     return status;
 }
 
-/* init application data */
+/* 
+ * Init PJSIP and alloc app mem
+ */
 static pj_status_t sbc_init(void)
 {
     pj_status_t status;
 
-    /* Init PJLIB first */
+    /*
+     * Init PJLIB first
+     */
     status = pj_init();
     if (status != PJ_SUCCESS)
     {
@@ -155,14 +164,16 @@ static pj_status_t sbc_init(void)
 
     pj_log_set_level(6);
 
-    /* Init PJLIB-UTIL */
+    /* 
+     * Init PJLIB-UTIL
+     */
     status = pjlib_util_init();
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
-    /* Create a pool factory before allocate memory */
+    /*
+     * Create a pool factory before allocate memory 
+     */
     pj_caching_pool_init(&cash_pool, &pj_pool_factory_default_policy, 0);
-
-    /* Logging success */
     PJ_LOG(3, (THIS_FILE, "initialized successfully\n"));
 
     return status;
@@ -243,16 +254,22 @@ static pj_status_t sbc_udp_transport_create(void)
 
 static void sbc_destroy(void)
 {
-    /* On exit, dump current memory usage: */
+    /*
+     * On exit, dump current memory usage:
+     */
     dump_pool_usage(THIS_FILE, &cash_pool);
 
-    /* Deinit pjsip endpoint */
+    /*
+     * Deinit pjsip endpoint 
+     */
     pjsip_endpt_destroy(g_endpt);
     g_endpt = NULL;
 
     pj_caching_pool_destroy(&cash_pool);
 
-    /* Shutdown PJLIB */
+    /*
+     * Shutdown PJLIB 
+     */
     pj_shutdown();
 }
 
@@ -261,12 +278,16 @@ static pj_status_t sbc_invite_mod_create(void)
     pj_status_t status;
     pjsip_inv_callback inv_cb;
 
-    /* Init the callback for INVITE */
+    /*
+     * Init the callback for INVITE 
+     */
     pj_bzero(&inv_cb, sizeof(inv_cb));
     inv_cb.on_state_changed = &call_on_state_changed;
     inv_cb.on_new_session = &call_on_forked;
 
-    /* Initialize invite session module:  */
+    /*
+     * Initialize invite session module
+     */
     status = pjsip_inv_usage_init(g_endpt, &inv_cb);
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, 1);
 
@@ -342,7 +363,7 @@ static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
     {
         pjsip_endpt_respond_stateless(g_endpt, rdata, 500, NULL,
                           NULL, NULL);
-        sbc_perror(THIS_FILE, "shutdown application", status);
+        sbc_perror(THIS_FILE, "Unable create UAS dialog", status);
     }
     
     /*
@@ -352,7 +373,7 @@ static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
     if (status != PJ_SUCCESS)
     {
         pjsip_dlg_dec_lock(uas_dlg);
-        sbc_perror(THIS_FILE, "shutdown application", status);
+        sbc_perror(THIS_FILE, "Unable add usage to UAS dialog", status);
     }
  
     /* 
@@ -363,7 +384,7 @@ static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
     if (status != PJ_SUCCESS) 
     {
         pjsip_dlg_dec_lock(uas_dlg);
-        sbc_perror(THIS_FILE, "shutdown application", status);
+        sbc_perror(THIS_FILE, "Unable bind UAS to INVITE module", status);
     }
 
     /*
@@ -403,7 +424,7 @@ static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
     PJ_ASSERT_RETURN(status == PJ_SUCCESS, PJ_TRUE);
 
     /*
-     * Send INVITE to other side //add if()
+     * Send INVITE to other side 
      */
     sbc_request_inv_send(rdata);
 
@@ -415,17 +436,36 @@ static pj_bool_t sbc_invite_handler(pjsip_rx_data *rdata)
  */
 static pj_bool_t sbc_request_inv_send(pjsip_rx_data *rdata)
 {
-    pj_status_t         status;
+    status_t         status;
     pjsip_tx_data       *p_tdata;
     pjsip_dialog        *uac_dlg;
     pjsip_tpselector    tp_sel;
+    pj_str_t            local_uri;
+    pj_str_t            dest_uri;
+    pj_str_t            contact_uri;
+
+    /*
+     * Parse from uri and get from contact
+     */
+    pjsip_sip_uri       *sip_uri;
+    char                temp[PJSIP_MAX_URL_SIZE];
+    char                from_user[PJ_MAX_HOSTNAME];
+    char                from_ip[PJ_INET_ADDRSTRLEN];
+    int                 from_port;
+
+    sip_uri = (pjsip_sip_uri *)rdata->msg_info.from->uri;
+    pj_ansi_snprintf(from_user, (pj_size_t)sip_uri->host.slen + 1, sip_uri->host.ptr);
+    pj_ansi_snprintf(from_ip, (pj_size_t)rdata->msg_info.via->sent_by.host.slen + 1, 
+                            rdata->msg_info.via->sent_by.host.ptr);
+    from_port = rdata->msg_info.via->sent_by.port;
+    pj_ansi_sprintf(temp, "<sip:%s@%s:%d>", from_user, from_ip, from_port);
 
     /*
      * Set route to direct for SBC
      */
-    pj_str_t            contact_uri = pj_str(SBC_URI_UAC);
-    pj_str_t            local_uri = pj_str("<sip:vlbrazhnikov@10.25.72.130:7777>");
-    pj_str_t            dest_uri = pj_str(ROUTE_ADDR);
+    local_uri = pj_str(temp);
+    dest_uri = pj_str(ROUTE_ADDR);
+    contact_uri = pj_str(SBC_URI_UAC);
 
     /*
      * Add new UDP transport ot TP_SELECTOR
@@ -527,7 +567,9 @@ static pj_bool_t sbc_response_code_send(pjsip_rx_data * rdata, unsigned code)
         if (status != PJ_SUCCESS)
             sbc_perror(THIS_FILE, "Error in create_sdp_body", status);
 
-        /* set new body */
+        /* 
+         * Set SDP body from B to A
+         */
         pj_size_t size = 100;
         char buf[size];
         p_tdata->msg->body = p_body;
